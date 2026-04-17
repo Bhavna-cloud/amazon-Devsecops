@@ -1,0 +1,100 @@
+name: Secure CI/CD Pipeline (Manual + OIDC)
+
+on:
+  workflow_dispatch:   # 👈 Manual trigger
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: ap-south-1
+      ECR_REPOSITORY: my-app-repo
+      IMAGE_NAME: my-app
+
+    steps:
+
+      # 🔹 Checkout
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # 🔹 AWS OIDC Login (NO CREDS)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME>
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 🔹 SonarQube Scan
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v2
+        with:
+          args: >
+            -Dsonar.projectKey=my-app
+            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+      # 🔹 Build Docker Image
+      - name: Build Docker Image
+        run: |
+          docker build -t $IMAGE_NAME:${{ github.sha }} .
+
+      # 🔹 Trivy FS Scan
+      - name: Trivy FS Scan
+        uses: aquasecurity/trivy-action@v0.20.0
+        with:
+          scan-type: fs
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+      # 🔹 Trivy Image Scan
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@v0.20.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+      # 🔹 Login to ECR
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      # 🔹 Tag Image
+      - name: Tag Image
+        run: |
+          docker tag $IMAGE_NAME:${{ github.sha }} \
+          <ACCOUNT_ID>.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      # 🔹 Push Image
+      - name: Push to ECR
+        run: |
+          docker push \
+          <ACCOUNT_ID>.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      # 🔹 Email Notification (SUCCESS + FAILURE)
+      - name: Notify Email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "${{ job.status == 'success' && '✅ SUCCESS' || '❌ FAILURE' }} - ${{ github.repository }}"
+          to: yourmail@gmail.com
+          from: GitHub Actions
+          body: |
+            🚀 CI/CD Pipeline Notification
+
+            Status: ${{ job.status }}
+            Repository: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+
+            🔗 Workflow URL:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
